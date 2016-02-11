@@ -1,0 +1,20 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Atmel Studio Solution File, Format Version 11.00
+Project("{54F91283-7BC4-4236-8FF9-10F437C3AD48}") = "AYBclock", "AYBclock.cproj", "{A33F04A3-5F74-427F-84FE-D3CC4C68D6EC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|AVR = Debug|AVR
+		Release|AVR = Release|AVR
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A33F04A3-5F74-427F-84FE-D3CC4C68D6EC}.Debug|AVR.ActiveCfg = Debug|AVR
+		{A33F04A3-5F74-427F-84FE-D3CC4C68D6EC}.Debug|AVR.Build.0 = Debug|AVR
+		{A33F04A3-5F74-427F-84FE-D3CC4C68D6EC}.Release|AVR.ActiveCfg = Release|AVR
+		{A33F04A3-5F74-427F-84FE-D3CC4C68D6EC}.Release|AVR.Build.0 = Release|AVR
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
