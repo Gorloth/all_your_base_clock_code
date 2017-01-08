@@ -30,7 +30,8 @@
 
 #define DIGIT_COUNT 10
 
-#define DISPLAY_TIMEOUT (1000 * 5 )
+#define DISPLAY_TIMEOUT       ( 1000 * 5 )
+#define QUICK_DISPLAY_TIMEOUT ( 1000 * 2 )
 
 #define DISPLAY_RATE 50
 #define DEBOUNCE_RATE 10
@@ -57,8 +58,9 @@
 #define DP (1<<7)
 
 typedef struct{
-    int8_t    hour;
-    int8_t    minute;
+    int8_t  hour;
+    int8_t  minute;
+    int8_t  second;
     } time_type;
 
 typedef int8_t encoder_dir;
@@ -342,20 +344,6 @@ if(btn_count == DEBOUNCE_RATE)
         {
         s_disp_state = (s_disp_state + 1) % DISPLAY_COUNT;
         s_disp_timer = DISPLAY_TIMEOUT;
-        switch( s_disp_state )
-            {
-            case DISPLAY_SET_HOUR:
-                OCR1A = PWM_RED;
-                break;
-
-            case DISPLAY_SET_MIN:
-                OCR1A = PWM_GREEN;
-                break;
-
-            default:
-                OCR1A = PWM_TOGGLE;
-                break;
-            }
         }
     }
 if(s_disp_timer)
@@ -403,8 +391,8 @@ minute = TWI_read(TRUE);
 hour = TWI_read(FALSE);
 TWI_stop();
 
+time.second = bcd_to_int(second & 0x7f);
 time.minute = bcd_to_int(minute & 0x7F);
-
 time.hour = bcd_to_int(hour & 0x3f);
 
 return(time);
@@ -480,16 +468,25 @@ static void format_display
     time_type time
     )
 {
+int8_t      sec_str[DIGIT_COUNT];
 int8_t      min_str[DIGIT_COUNT];
 int8_t      hr_str[DIGIT_COUNT];
 
 uint8_t     i;
 
+uint8_t     sec_len;
 uint8_t     min_len;
-uint8_t     min_max_len;
+uint8_t     max_len;
 uint8_t     hr_len;
+uint8_t     offset;
 
-bool        blink_state;
+bool        overlap;
+bool        dp_blink;
+bool        dp_fill;
+uint8_t     dp_start;
+uint8_t     dp_end;
+uint8_t     dp_green;
+uint8_t     dp_red;
 
 for(i = 0; i < DIGIT_COUNT; i++)
     {
@@ -524,51 +521,82 @@ if(s_disp_state == DISPLAY_BASE)
     }
 else
     {
+    overlap = FALSE;
+    dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
+    max_len = max_width(base);
 
-    blink_state = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
+    sec_len = convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
+    for(i = sec_len; i < max_len; i++)
+    {
+        sec_str[i] = 0;
+    }
+    sec_len = max_len;
 
     min_len = convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
-    min_max_len = max_width(base);
-    for(i = min_len; i < min_max_len; i++)
+    for(i = min_len; i < max_len; i++)
         {
         min_str[i] = 0;
         }
-    min_len = min_max_len;
+    min_len = max_len;
     hr_len = convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
+    if( hr_len == 0 )
+        {
+        hr_str[0] = 0;
+        hr_len++;
+        }
 
     // |Base| > 20 needs to use red/green for the digits, thus can't overlay
     if(base > 20 || base < -20)
         {
+        dp_blink = TRUE;
+        for(i = 0; i < sec_len; i++)
+            {
+            if(sec_str[i] >= 40)
+                {
+                disp_red[i] = numbers[sec_str[i] - 40];
+                }
+            else if(sec_str[i] >= 20)
+                {
+                disp_green[i] = numbers[sec_str[i] - 20];
+                disp_red[i] = numbers[sec_str[i] - 20];
+                }
+            else
+                {
+                disp_green[i] = numbers[sec_str[i]];
+                }
+            }
+        offset = sec_len;
         for(i = 0; i < min_len; i++)
             {
             if(min_str[i] >= 40)
                 {
-                disp_red[i] = numbers[min_str[i] - 40];
+                disp_red[i+offset] = numbers[min_str[i] - 40];
                 }
             else if(min_str[i] >= 20)
                 {
-                disp_green[i] = numbers[min_str[i] - 20];
-                disp_red[i] = numbers[min_str[i] - 20];
+                disp_green[i+offset] = numbers[min_str[i] - 20];
+                disp_red[i+offset] = numbers[min_str[i] - 20];
                 }
             else
                 {
-                disp_green[i] = numbers[min_str[i]];
+                disp_green[i+offset] = numbers[min_str[i]];
                 }
             }
+        offset += min_len;
         for(i = 0; i < hr_len; i++)
             {
             if(hr_str[i] >= 40)
                 {
-                disp_red[i+min_len] = numbers[hr_str[i] - 40];
+                disp_red[i+offset] = numbers[hr_str[i] - 40];
                 }
             else if(hr_str[i] >= 20)
                 {
-                disp_green[i+min_len] = numbers[hr_str[i] - 20];
-                disp_red[i+min_len] = numbers[hr_str[i] - 20];
+                disp_green[i+offset] = numbers[hr_str[i] - 20];
+                disp_red[i+offset] = numbers[hr_str[i] - 20];
                 }
             else
                 {
-                disp_green[i+min_len] = numbers[hr_str[i]];
+                disp_green[i+offset] = numbers[hr_str[i]];
                 }
             }
         }
@@ -576,6 +604,8 @@ else
     // hours in red, minutes in green
     else if((min_len + hr_len) > DIGIT_COUNT)
         {
+        overlap = TRUE;
+        sec_len = 0;
         for(i = 0; i < min_len; i++)
             {
             disp_green[i] = numbers[min_str[i]];
@@ -587,19 +617,94 @@ else
         }
     else
         {
+        offset = 0;
+        if( sec_len + min_len + hr_len <= DIGIT_COUNT )
+            {
+            for(i = 0; i < sec_len; i++)
+                {
+                disp_green[i] = numbers[sec_str[i]];
+                disp_red[i] = numbers[sec_str[i]];
+                }
+            offset += sec_len;
+            dp_blink = TRUE;
+            }
+        else
+            {
+            sec_len = 0;
+            }
         for(i = 0; i < min_len; i++)
             {
-            disp_green[i] = numbers[min_str[i]];
+            disp_green[i+offset] = numbers[min_str[i]];
             }
+        offset += min_len;
         for(i = 0; i < hr_len; i++)
             {
-            disp_red[i + min_len] = numbers[hr_str[i]];
+            disp_red[i+offset] = numbers[hr_str[i]];
             }
         }
-    if(blink_state)
+
+    dp_green = DP;
+    dp_red = DP;
+
+    switch( s_disp_state )
         {
-        disp_green[min_len] |= DP;
-        disp_red[min_len] |= DP;
+        case DISPLAY_SET_HOUR:
+            if( overlap )
+                {
+                dp_green = 0;
+                dp_start = sec_len;
+                dp_end = sec_len + hr_len;
+                dp_fill = TRUE;
+                }
+            else
+                {
+                dp_start = sec_len + min_len;
+                dp_end = sec_len + min_len + hr_len;
+                dp_fill = TRUE;
+                }                
+            break;
+
+        case DISPLAY_SET_MIN:
+            if( overlap )
+                {
+                dp_red = 0;
+                }
+            dp_start = sec_len;
+            dp_end = sec_len + min_len;
+            dp_fill = TRUE;
+            break;
+
+        default:
+            dp_start = sec_len;
+            if( overlap )
+                {
+                dp_end = dp_start;
+                }
+            else
+                {
+                dp_end = sec_len + min_len;
+                }
+            dp_fill = FALSE;
+            break;
+        }
+
+    if( dp_fill )
+        {
+        for( i = dp_start; i < dp_end; i++ )
+            {
+            if( dp_blink )
+                {
+                disp_green[i] |= dp_green;
+                disp_red[i] |= dp_red;
+                }
+            }
+        }
+    else if( dp_blink )
+        {
+        disp_green[dp_start] |= dp_green;
+        disp_red[dp_start] |= dp_red;
+        disp_green[dp_end] |= dp_green;
+        disp_red[dp_end] |= dp_red;
         }
     }
 }
@@ -633,47 +738,47 @@ static uint8_t max_width
     )
 {
 uint8_t     width;
-if(base > 0)
+switch(base)
     {
-    switch(base)
-        {
-            case 2:
-                width = 6;
-                break;
+    case -2:
+        width = 7;
+        break;
 
-            case 3:
-                width = 4;
-                break;
+    case -3:
+    case -4:
+        width = 5;
+        break;
+            
+    case 2:
+        width = 6;
+        break;
 
-            case 4:
-            case 5:
-            case 6:
-            case 7:
-                width = 3;
-                break;
+    case 3:
+        width = 4;
+        break;
 
-            default:
-                width = 2;
-                break;
-        }
-    }
-else
-    {
-    switch(base)
-        {
-            case -2:
-                width = 7;
-                break;
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+        width = 3;
+        break;
 
-            case -3:
-            case -4:
-                width = 5;
-                break;
+    case -60:
+    case 60:
+        width = 1;
+        break;
 
-            default:
-                width = 3;
-                break;
-        }
+    default:
+        if( base > 0 )
+            {
+            width = 2;
+            }
+        else
+            {
+            width = 3;
+            }
+        break;
     }
 
 return(width);
@@ -718,38 +823,42 @@ if( dir == ENCODER_NONE )
 
 switch( s_disp_state )
     {
-        case DISPLAY_BASE:
-        case DISPLAY_TIME:
-            if( s_disp_state == DISPLAY_BASE )
-                {
-                s_base = s_base + dir;
-                if( s_base == 1 || s_base == -1 )
-                    {
-                    s_base = s_base + 3 * dir;
-                    }
-                }
-            s_disp_state = DISPLAY_BASE;
-            s_disp_update_flag = TRUE;
-            s_disp_timer = DISPLAY_TIMEOUT;
-            break;
+    case DISPLAY_TIME:
+        s_disp_state = DISPLAY_BASE;
+        s_disp_update_flag = TRUE;
+        s_disp_timer = QUICK_DISPLAY_TIMEOUT;
+        break;
+        
+    case DISPLAY_BASE:
+        s_base += dir;
+        if( s_base == 1 || s_base == -1 )
+            {
+            s_base = s_base + 3 * dir;
+            }
+        else if( s_base == 61 || s_base == -61 )
+            {
+            s_base -= dir;
+            }
+        s_disp_update_flag = TRUE;
+        s_disp_timer = QUICK_DISPLAY_TIMEOUT;
+        break;
 
-        case DISPLAY_SET_HOUR:
-            //time.hour = ( time.hour + 24 + dir) % 24;
-            time.hour += dir;
-            s_disp_update_flag = TRUE;
-            set_time( time );
-            s_disp_timer = DISPLAY_TIMEOUT;
-            break;
+    case DISPLAY_SET_HOUR:
+        time.hour = ( time.hour + 24 + dir) % 24;
+        s_disp_update_flag = TRUE;
+        set_time( time );
+        s_disp_timer = DISPLAY_TIMEOUT;
+        break;
 
-        case DISPLAY_SET_MIN:
-            time.minute = ( time.minute + 60 + dir) % 60;
-            s_disp_update_flag = TRUE;
-            set_time( time );
-            s_disp_timer = DISPLAY_TIMEOUT;
-            break;
+    case DISPLAY_SET_MIN:
+        time.minute = ( time.minute + 60 + dir) % 60;
+        s_disp_update_flag = TRUE;
+        set_time( time );
+        s_disp_timer = DISPLAY_TIMEOUT;
+        break;
 
-        default:
-            break;
+    default:
+        break;
     }
 }
 
