@@ -13,20 +13,10 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#define TRUE 1
-#define FALSE 0
-
-//define the codes for actions to occur
-#define TWCR_START      ((1<<TWINT)|(1<<TWSTA)|(1<<TWEN)) //send start condition
-#define TWCR_STOP       ((1<<TWINT)|(1<<TWSTO)|(1<<TWEN)) //send stop condition
-#define TWCR_RACK       ((1<<TWINT)|(1<<TWEN)|(1<<TWEA)) //receive byte and return ack to slave
-#define TWCR_RNACK      ((1<<TWINT)|(1<<TWEN)) //receive byte and return nack to slave
-#define TWCR_SEND       ((1<<TWINT)|(1<<TWEN)) //pokes the TWINT flag in TWCR and TWEN
-
-#define TWI_PINS        (1<<PORTC4|1<<PORTC5)
-
-#define CLOCK_ADDR_READ     0xDF
-#define CLOCK_ADDR_WRITE    0xDE
+#include "clock.h"
+#include "math.h"
+#include "spi.h"
+#include "twi.h"
 
 #define DIGIT_COUNT 10
 
@@ -63,12 +53,6 @@
 #define G  (1<<6)
 #define DP (1<<7)
 
-typedef struct{
-    int8_t  hour;
-    int8_t  minute;
-    int8_t  second;
-    } time_type;
-
 typedef int8_t encoder_dir;
 enum
     {
@@ -103,7 +87,7 @@ enum
 
 ------------------------------------*/
 
-static const uint8_t numbers[] =
+static const uint8_t digits[] =
     {
     (A|B|C|D|E|F),   //0
     (B|C),           //1
@@ -125,64 +109,35 @@ static const uint8_t numbers[] =
     (B|C|E|F|G),     //H
     (A|B|C|D),       //I
     (B|C|D),         //J
-    (0),             //NONE
+    (B|C|E|F|G),     //K
+    (D|E|F),         //L
+    (A|C|E|G),       //M
+    (C|E|G),         //N
+    (A|B|C|D|E|F),   //O
+    (A|B|E|F|G),     //P
+    (A|B|C|F|G),     //Q
+    (E|G),           //R
+    (A|C|D|F|G),     //S
+    (D|E|F|G),       //T
+    (B|C|D|E|F),     //U
+    (C|D|E),         //V
+    (B|D|F),         //W
+    (B|C|E|F|G),     //X
+    (B|C|D|F|G),     //Y
+    (A|B|D|E|G),     //Z
+    (0)              //None
     };
 
-static const uint8_t letters[] =
-    {
-    (A|B|C|E|F|G),  //A
-    (F|G|C|D|E),    //B
-    (G|E|D),        //C
-    (E|G|B|C|D),    //D
-    (A|F|G|E|D),    //E
-    (A|F|G|E),      //F
-    (A|C|D|E|F),    //G
-    (B|C|E|F|G),    //H
-    (A|B|C|D),      //I
-    (B|C|D),        //J
-    (B|C|E|F|G),    //K
-    (D|E|F),        //L
-    (A|C|E|G),      //M
-    (C|E|G),        //N
-    (A|B|C|D|E|F),  //O
-    (A|B|E|F|G),    //P
-    (A|B|C|F|G),    //Q
-    (E|G),          //R
-    (A|C|D|F|G),    //S
-    (D|E|F|G),      //T
-    (B|C|D|E|F),    //U
-    (C|D|E),        //V
-    (B|D|F),        //W
-    (B|C|E|F|G),    //X
-    (B|C|D|F|G),    //Y
-    (A|B|D|E|G)     //Z
-    };
+static const uint8_t *numbers = digits;
 
-static uint8_t convert_to_base(
-    int8_t      number,
-    int8_t      base,
-    int8_t     *output,
-    uint8_t     out_sz
-    );
+static const uint8_t *letters = &digits[10];
 
-static void format_display(int8_t base, time_type time);
-static time_type get_time(void);
-static void init_spi(void);
-static uint8_t spi(uint8_t data);
+static void format_display(int8_t base, CLK_time_type time);
 static void init_timers(void);
 static void display(void);
 static encoder_dir encoder_read(void);
-static void init_twi(void);
-static uint8_t TWI_start(void);
-static uint8_t TWI_write(uint8_t data);
-static uint8_t TWI_read(bool ack);
-static void TWI_stop(void);
-static void init_clock(void);
-static uint8_t bcd_to_int(uint8_t data);
-static uint8_t int_to_bcd(uint8_t data);
 static void format_string( const char *string );
-static void set_time( time_type time );
-static void process_knob( time_type time );
+static void process_knob( CLK_time_type time );
 
 static volatile uint16_t v_ms;
 static volatile uint16_t v_time;
@@ -198,100 +153,6 @@ static uint8_t  disp_green[DIGIT_COUNT];
 
 static int8_t   s_base;
 
-//******************************************************************************
-//                          init_twi
-//initialize TWI registers
-//
-static void init_twi(void)
-{
-TWBR = 80;
-}
-
-static uint8_t TWI_start(void)
-{
-TWCR = TWCR_START; //send start condition
-while(!(TWCR & (1 << TWINT)))
-    {
-    } //wait for start condition to transmit
-if((TW_STATUS != TW_START) & (TW_STATUS != TW_REP_START))
-    {
-    return(1);
-    }
-return(0); //return success value
-}
-
-//******************************************************************************
-static uint8_t TWI_write
-    (
-    uint8_t data
-    )
-{
-TWDR = data; //send device addr, write bit set
-TWCR = TWCR_SEND; //poke TWINT to send address
-while(!(TWCR & (1 << TWINT)))
-    {
-    } //wait for LM73 address to go out
-if(TW_STATUS != TW_MT_SLA_ACK)
-    {
-    return(1);
-    }//check status reg for SLA+W ACK
-return(0); //return success value
-}
-
-//******************************************************************************
-static uint8_t TWI_read
-    (
-    bool ack
-    )
-{
-if(ack)
-    {
-    TWCR = TWCR_RACK; //poke TWINT to send address
-    }
-else
-    {
-    TWCR = TWCR_RNACK; //poke TWINT to send address
-    }
-while(!(TWCR & (1 << TWINT)))
-    {
-    } //wait for LM73 address to go out
-return(TWDR); //return success value
-}
-
-//******************************************************************************
-static void TWI_stop(void)
-{
-TWCR = TWCR_STOP; //finish transaction
-}
-
-static void init_spi(void)
-{
-SPCR = 1 << SPE | 1 << MSTR | 1 << CPOL;
-SPSR = 1 << SPI2X;
-}
-
-static uint8_t spi
-    (
-    uint8_t data
-    )
-{
-SPDR = data;
-while(bit_is_clear(SPSR, SPIF))
-    {
-    }
-return(SPDR);
-}
-
-static uint8_t bcd_to_int(uint8_t data)
-{
-return((data & 0x0F) + ((data & 0xF0) >> 4) * 10);
-}
-
-static uint8_t int_to_bcd(uint8_t data)
-{
-return( ( data % 10 ) | ( ( data / 10 ) << 4 ) );
-}
-
 static void init_timers(void)
 {
 //PB1 output
@@ -306,28 +167,10 @@ ICR1 = PWM_TOP;
 //Toggle at
 OCR1A = PWM_TOGGLE;
 
-
 OCR2A = 250 - 1;
 TCCR2A = 1 << COM2A1 | 1 << WGM21;
 TCCR2B = 1 << CS22;
 TIMSK2 = 1 << OCIE2A;
-}
-
-static void init_clock(void)
-{
-//Start Clock
-TWI_start();
-TWI_write(CLOCK_ADDR_WRITE);
-TWI_write(0x00);
-TWI_write(0x80);
-TWI_stop();
-
-//Enable 1Hz outptut
-TWI_start();
-TWI_write(CLOCK_ADDR_WRITE);
-TWI_write(0x07);
-TWI_write((1 << 6));
-TWI_stop();
 }
 
 ISR(TIMER2_COMPA_vect)
@@ -362,7 +205,7 @@ if(v_disp_timer)
     }
 if(disp_count++ == DISPLAY_RATE)
     {
-    v_disp_update_flag = TRUE;
+    v_disp_update_flag = true;
     disp_count = 0;
     }
 if(count == 1000)
@@ -374,43 +217,6 @@ if(count == 1000)
         v_time = 0;
         }
     }
-}
-
-static time_type get_time(void)
-{
-uint8_t     second;
-uint8_t     minute;
-uint8_t     hour;
-time_type   time;
-
-time.hour = 0;
-time.minute = 0;
-
-TWI_start();
-TWI_write(CLOCK_ADDR_WRITE);
-TWI_write(0x00);
-TWI_start();
-TWI_write(CLOCK_ADDR_READ);
-second = TWI_read(TRUE);
-minute = TWI_read(TRUE);
-hour = TWI_read(FALSE);
-TWI_stop();
-
-time.second = bcd_to_int(second & 0x7f);
-time.minute = bcd_to_int(minute & 0x7F);
-time.hour = bcd_to_int(hour & 0x3f);
-
-return(time);
-}
-
-static void set_time( time_type time )
-{
-TWI_start();
-TWI_write(CLOCK_ADDR_WRITE);
-TWI_write(0x01);
-TWI_write(int_to_bcd(time.minute));
-TWI_write(int_to_bcd(time.hour));
-TWI_stop();
 }
 
 //******************************************************************************
@@ -477,7 +283,7 @@ while( *string && i-- > 0 )
 static void format_display
     (
     int8_t base,
-    time_type time
+    CLK_time_type time
     )
 {
 int8_t      sec_str[DIGIT_COUNT];
@@ -516,7 +322,7 @@ if(v_disp_state == DISPLAY_BASE)
     {
     format_string( "BASE");
 
-    min_len = convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
+    min_len = MTH_convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
     if(base < 0)
         {
         disp_ptr = disp_red;
@@ -539,26 +345,26 @@ if(v_disp_state == DISPLAY_BASE)
     }
 else
     {
-    overlap = FALSE;
+    overlap = false;
     dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
-    max_len = convert_to_base(60, base, hr_str, DIGIT_COUNT);
+    max_len = MTH_convert_to_base(60, base, hr_str, DIGIT_COUNT);
 
-    sec_len = convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
+    sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
     for(i = sec_len; i < max_len; i++)
     {
         sec_str[i] = 0;
     }
     sec_len = max_len;
 
-    min_len = convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
+    min_len = MTH_convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
     for(i = min_len; i < max_len; i++)
         {
         min_str[i] = 0;
         }
     min_len = max_len;
 
-    max_len = convert_to_base(24, base, hr_str, DIGIT_COUNT);
-    hr_len = convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
+    max_len = MTH_convert_to_base(24, base, hr_str, DIGIT_COUNT);
+    hr_len = MTH_convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
     for(i = hr_len; i < max_len; i++)
         {
         hr_str[i] = 0;
@@ -568,7 +374,7 @@ else
     // |Base| > 20 needs to use red/green for the digits, thus can't overlay
     if(base > 20 || base < -20)
         {
-        dp_blink = TRUE;
+        dp_blink = true;
         for(i = 0; i < sec_len; i++)
             {
             if(sec_str[i] >= 40)
@@ -624,7 +430,7 @@ else
     // hours in red, minutes in green
     else if((min_len + hr_len) > DIGIT_COUNT)
         {
-        overlap = TRUE;
+        overlap = true;
         sec_len = 0;
         for(i = 0; i < min_len; i++)
             {
@@ -646,7 +452,7 @@ else
                 disp_red[i] = numbers[sec_str[i]];
                 }
             offset += sec_len;
-            dp_blink = TRUE;
+            dp_blink = true;
             }
         else
             {
@@ -687,13 +493,13 @@ else
                 dp_green = 0;
                 dp_start = sec_len;
                 dp_end = sec_len + hr_len;
-                dp_fill = TRUE;
+                dp_fill = true;
                 }
             else
                 {
                 dp_start = sec_len + min_len;
                 dp_end = sec_len + min_len + hr_len;
-                dp_fill = TRUE;
+                dp_fill = true;
                 }
             break;
 
@@ -710,7 +516,7 @@ else
                 }
             dp_start = sec_len;
             dp_end = sec_len + min_len;
-            dp_fill = TRUE;
+            dp_fill = true;
             break;
 
         /*---------------------------------------
@@ -729,7 +535,7 @@ else
                 {
                 dp_end = sec_len + min_len;
                 }
-            dp_fill = FALSE;
+            dp_fill = false;
             break;
         }
 
@@ -777,34 +583,7 @@ PORTC |= GREEN_EN_PIN;
 PORTB &= ~DISPLAY_ENABLE_PIN;
 }
 
-static uint8_t convert_to_base
-    (
-    int8_t      number,
-    int8_t      base,
-    int8_t     *output,
-    uint8_t     out_sz
-    )
-{
-uint8_t         i;
-
-i = 0;
-
-for(i = 0; i < out_sz && number; i++)
-    {
-    *output = number % base;
-    number = number / base;
-    if(*output < 0)
-        {
-        *output += abs(base);
-        number++;
-        }
-    output++;
-    }
-
-return(i);
-}
-
-static void process_knob( time_type time )
+static void process_knob( CLK_time_type time )
 {
 encoder_dir     dir;
 
@@ -818,7 +597,7 @@ switch( v_disp_state )
     {
     case DISPLAY_TIME:
         v_disp_state = DISPLAY_BASE;
-        v_disp_update_flag = TRUE;
+        v_disp_update_flag = true;
         v_disp_timer = QUICK_DISPLAY_TIMEOUT;
         break;
         
@@ -832,21 +611,21 @@ switch( v_disp_state )
             {
             s_base -= dir;
             }
-        v_disp_update_flag = TRUE;
+        v_disp_update_flag = true;
         v_disp_timer = QUICK_DISPLAY_TIMEOUT;
         break;
 
     case DISPLAY_SET_HOUR:
         time.hour = ( time.hour + 24 + dir) % 24;
-        v_disp_update_flag = TRUE;
-        set_time( time );
+        v_disp_update_flag = true;
+        CLK_time_set( time );
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
     case DISPLAY_SET_MIN:
         time.minute = ( time.minute + 60 + dir) % 60;
-        v_disp_update_flag = TRUE;
-        set_time( time );
+        v_disp_update_flag = true;
+        CLK_time_set( time );
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
@@ -857,16 +636,17 @@ switch( v_disp_state )
 
 int main(void)
 {
-time_type   time;
+CLK_time_type   time;
 
 DDRB = 0xFF;
 DDRC = GREEN_EN_PIN | RED_EN_PIN;
 PORTD = ENCODER_IN_PINS | CLOCK_IN_PIN;
-PORTC = GREEN_EN_PIN | RED_EN_PIN | TWI_PINS | BUTTON_IN_PIN;
+PORTC = GREEN_EN_PIN | RED_EN_PIN | BUTTON_IN_PIN;
 
 init_timers();
-init_spi();
-init_twi();
+spi_init();
+TWI_init();
+CLK_init();
 
 v_ms = 0;
 time.hour = 12;
@@ -875,17 +655,15 @@ s_base = 10;
 
 sei();
 
-init_clock();
-
 while(1)
     {
-    time = get_time();
+    time = CLK_time_get();
     process_knob( time );
     format_display(s_base, time);
 
-    if(v_disp_update_flag == TRUE)
+    if(v_disp_update_flag == true)
         {
-        v_disp_update_flag = FALSE;
+        v_disp_update_flag = false;
         display();
         }
 
