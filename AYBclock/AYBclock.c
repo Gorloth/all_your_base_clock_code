@@ -41,20 +41,26 @@
 #define PWM_RED    ( PWM_TOP * .9f )
 #define PWM_GREEN  ( PWM_TOP * .1f )
 
-#define GREEN_EN_PIN    (1<<PORTC1)
-#define RED_EN_PIN      (1<<PORTC2)
+#define GREEN_EN_PIN        (1<<PORTC1)
+#define RED_EN_PIN          (1<<PORTC2)
 
-#define BUTTON_IN_PIN   (1<<PORTC0)
+#define DISPLAY_ENABLE_PIN  (1<<PORTB0)
 
-#define CLOCK_IN_PIN    (1<<PORTD7)
+#define BUTTON_IN_PIN       (1<<PORTC0)
 
-#define A (1<<0)
-#define B (1<<1)
-#define C (1<<2)
-#define D (1<<3)
-#define E (1<<4)
-#define F (1<<5)
-#define G (1<<6)
+#define CLOCK_IN_PIN        (1<<PORTD7)
+
+#define ENCODER_IN_PINS     (1<<PORTD2|1<<PORTD3)
+#define ENCODER_SHIFT       2
+#define ENCODER_MASK        0x03
+
+#define A  (1<<0)
+#define B  (1<<1)
+#define C  (1<<2)
+#define D  (1<<3)
+#define E  (1<<4)
+#define F  (1<<5)
+#define G  (1<<6)
 #define DP (1<<7)
 
 typedef struct{
@@ -95,7 +101,7 @@ enum
  |       |
   ---D---
 
- ------------------------------------*/
+------------------------------------*/
 
 static const uint8_t numbers[] =
     {
@@ -159,7 +165,6 @@ static uint8_t convert_to_base(
     uint8_t     out_sz
     );
 
-static uint8_t max_width(int8_t base);
 static void format_display(int8_t base, time_type time);
 static time_type get_time(void);
 static void init_spi(void);
@@ -179,19 +184,19 @@ static void format_string( const char *string );
 static void set_time( time_type time );
 static void process_knob( time_type time );
 
-static volatile uint16_t s_ms;
-static volatile uint16_t s_time;
+static volatile uint16_t v_ms;
+static volatile uint16_t v_time;
 
-static volatile uint8_t  disp_red[DIGIT_COUNT];
-static volatile uint8_t  disp_green[DIGIT_COUNT];
+static volatile uint8_t v_disp_update_flag;
 
-static volatile uint8_t s_disp_update_flag;
+static volatile display_state v_disp_state;
 
-static volatile display_state s_disp_state;
+static volatile uint16_t v_disp_timer;
 
-static volatile uint16_t s_disp_timer;
+static uint8_t  disp_red[DIGIT_COUNT];
+static uint8_t  disp_green[DIGIT_COUNT];
 
-static int8_t            s_base;
+static int8_t   s_base;
 
 //******************************************************************************
 //                          init_twi
@@ -333,7 +338,7 @@ static uint8_t  btn_count;
 static uint8_t  btn_data;
 
 count++;
-s_ms++;
+v_ms++;
 btn_count++;
 if(btn_count == DEBOUNCE_RATE)
     {
@@ -342,31 +347,31 @@ if(btn_count == DEBOUNCE_RATE)
     btn_data |= (PINC & BUTTON_IN_PIN);
     if(btn_data == 0xF0)
         {
-        s_disp_state = (s_disp_state + 1) % DISPLAY_COUNT;
-        s_disp_timer = DISPLAY_TIMEOUT;
+        v_disp_state = (v_disp_state + 1) % DISPLAY_COUNT;
+        v_disp_timer = DISPLAY_TIMEOUT;
         }
     }
-if(s_disp_timer)
+if(v_disp_timer)
     {
-    s_disp_timer--;
-    if(!s_disp_timer)
+    v_disp_timer--;
+    if(!v_disp_timer)
         {
-        s_disp_state = DISPLAY_TIME;
+        v_disp_state = DISPLAY_TIME;
         OCR1A = PWM_TOGGLE;
         }
     }
 if(disp_count++ == DISPLAY_RATE)
     {
-    s_disp_update_flag = TRUE;
+    v_disp_update_flag = TRUE;
     disp_count = 0;
     }
 if(count == 1000)
     {
     count = 0;
-    s_time++;
-    if(s_time == 10000)
+    v_time++;
+    if(v_time == 10000)
         {
-        s_time = 0;
+        v_time = 0;
         }
     }
 }
@@ -410,9 +415,9 @@ TWI_stop();
 
 //******************************************************************************
 //                          encoder_read
-//reads the value from the encoders using SPI and calculates the direction
-//of turning by saving the previous 4 states of the encoders, states are only
-//updated if the encoders value has changes from the last check
+// reads the value from the encoder calculates the direction of turning by
+// saving the previous 4 states of the encoders, states are only updated if 
+// the encoders value has changes from the last check
 static encoder_dir encoder_read( void )
 {
 static uint16_t     encoder;
@@ -420,11 +425,11 @@ static uint16_t     encoder;
 uint16_t            data_in;
 encoder_dir         dir;
 
-data_in = ((PIND & (1 << PORTD2 | 1 << PORTD3)) >> 2) & 0x03;
+data_in = ((PIND & ENCODER_IN_PINS) >> ENCODER_SHIFT ) & ENCODER_MASK;
 
 dir = ENCODER_NONE;
 
-if((0x03 & encoder) != (data_in & 0x03))
+if((encoder & ENCODER_MASK) != (data_in & ENCODER_MASK))
     {
     encoder = (encoder << 2) | data_in;
     //only look at the last 10 bits of the past states
@@ -442,6 +447,9 @@ if((0x03 & encoder) != (data_in & 0x03))
 return(dir);
 }
 
+//******************************************************************************
+//                          format_string
+// Takes a string and adds it to the display in yellow starting at the left end
 static void format_string
     (
     const char *string
@@ -462,6 +470,10 @@ while( *string && i-- > 0 )
     }
 }
 
+//******************************************************************************
+//                          format_display
+// formats the display based on the current display mode. Either shows the
+// current time or one of the menus based on the current state
 static void format_display
     (
     int8_t base,
@@ -471,6 +483,8 @@ static void format_display
 int8_t      sec_str[DIGIT_COUNT];
 int8_t      min_str[DIGIT_COUNT];
 int8_t      hr_str[DIGIT_COUNT];
+
+uint8_t    *disp_ptr;
 
 uint8_t     i;
 
@@ -498,22 +512,26 @@ for(i = 0; i < DIGIT_COUNT; i++)
     disp_red[i] = 0;
     }
 
-if(s_disp_state == DISPLAY_BASE)
+if(v_disp_state == DISPLAY_BASE)
     {
     format_string( "BASE");
 
     min_len = convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
+    if(base < 0)
+        {
+        disp_ptr = disp_red;
+        }
+    else
+        {
+        disp_ptr = disp_green;
+        }
+
     for(i = 0; i < min_len; i++)
         {
-        if(base < 0)
-            {
-            disp_red[i] = numbers[min_str[i]];
-            }
-        else
-            {
-            disp_green[i] = numbers[min_str[i]];
-            }
+        *disp_ptr = numbers[min_str[i]];
+        disp_ptr++;
         }
+
     if(base < 0)
         {
         disp_red[i] = G;
@@ -523,7 +541,7 @@ else
     {
     overlap = FALSE;
     dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
-    max_len = max_width(base);
+    max_len = convert_to_base(60, base, hr_str, DIGIT_COUNT);
 
     sec_len = convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
     for(i = sec_len; i < max_len; i++)
@@ -538,12 +556,14 @@ else
         min_str[i] = 0;
         }
     min_len = max_len;
+
+    max_len = convert_to_base(24, base, hr_str, DIGIT_COUNT);
     hr_len = convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
-    if( hr_len == 0 )
+    for(i = hr_len; i < max_len; i++)
         {
-        hr_str[0] = 0;
-        hr_len++;
+        hr_str[i] = 0;
         }
+    hr_len = max_len;
 
     // |Base| > 20 needs to use red/green for the digits, thus can't overlay
     if(base > 20 || base < -20)
@@ -643,11 +663,24 @@ else
             }
         }
 
+    /*-------------------------------------------
+    Calculate the decimal point placement, If the
+    display mode is setting time highlight the
+    decimal points for the numbers being set
+    otherwise put it between the hour/min/sec
+    divide
+    -------------------------------------------*/
     dp_green = DP;
     dp_red = DP;
-
-    switch( s_disp_state )
+    
+    switch( v_disp_state )
         {
+        /*---------------------------------------
+        Highlight the hours with decimal points
+        while setting, use yellow if the hours
+        are separate, otherwise use the hour
+        color (red)
+        ---------------------------------------*/
         case DISPLAY_SET_HOUR:
             if( overlap )
                 {
@@ -661,9 +694,15 @@ else
                 dp_start = sec_len + min_len;
                 dp_end = sec_len + min_len + hr_len;
                 dp_fill = TRUE;
-                }                
+                }
             break;
 
+        /*---------------------------------------
+        Highlight the minutes with decimal points
+        while setting, use yellow if the minutes
+        are separate, otherwise use the minute
+        color (green)
+        ---------------------------------------*/
         case DISPLAY_SET_MIN:
             if( overlap )
                 {
@@ -674,6 +713,12 @@ else
             dp_fill = TRUE;
             break;
 
+        /*---------------------------------------
+        If the hour and minutes are overlapping
+        then put the flashing second at the far
+        right. If there is no overlap put the dot
+        between each group (H/M/S)
+        ---------------------------------------*/
         default:
             dp_start = sec_len;
             if( overlap )
@@ -713,7 +758,7 @@ static void display(void)
 {
 int8_t      i;
 
-PORTB |= (1 << PORTB0);
+PORTB |= DISPLAY_ENABLE_PIN;
 
 for(i = DIGIT_COUNT - 1; i >= 0; i--)
     {
@@ -729,59 +774,7 @@ for(i = DIGIT_COUNT - 1; i >= 0; i--)
 PORTC &= ~GREEN_EN_PIN;
 PORTC |= GREEN_EN_PIN;
 
-PORTB &= ~(1 << PORTB0);
-}
-
-static uint8_t max_width
-    (
-    int8_t      base
-    )
-{
-uint8_t     width;
-switch(base)
-    {
-    case -2:
-        width = 7;
-        break;
-
-    case -3:
-    case -4:
-        width = 5;
-        break;
-            
-    case 2:
-        width = 6;
-        break;
-
-    case 3:
-        width = 4;
-        break;
-
-    case 4:
-    case 5:
-    case 6:
-    case 7:
-        width = 3;
-        break;
-
-    case -60:
-    case 60:
-        width = 1;
-        break;
-
-    default:
-        if( base > 0 )
-            {
-            width = 2;
-            }
-        else
-            {
-            width = 3;
-            }
-        break;
-    }
-
-return(width);
+PORTB &= ~DISPLAY_ENABLE_PIN;
 }
 
 static uint8_t convert_to_base
@@ -821,12 +814,12 @@ if( dir == ENCODER_NONE )
     return;
     }
 
-switch( s_disp_state )
+switch( v_disp_state )
     {
     case DISPLAY_TIME:
-        s_disp_state = DISPLAY_BASE;
-        s_disp_update_flag = TRUE;
-        s_disp_timer = QUICK_DISPLAY_TIMEOUT;
+        v_disp_state = DISPLAY_BASE;
+        v_disp_update_flag = TRUE;
+        v_disp_timer = QUICK_DISPLAY_TIMEOUT;
         break;
         
     case DISPLAY_BASE:
@@ -839,22 +832,22 @@ switch( s_disp_state )
             {
             s_base -= dir;
             }
-        s_disp_update_flag = TRUE;
-        s_disp_timer = QUICK_DISPLAY_TIMEOUT;
+        v_disp_update_flag = TRUE;
+        v_disp_timer = QUICK_DISPLAY_TIMEOUT;
         break;
 
     case DISPLAY_SET_HOUR:
         time.hour = ( time.hour + 24 + dir) % 24;
-        s_disp_update_flag = TRUE;
+        v_disp_update_flag = TRUE;
         set_time( time );
-        s_disp_timer = DISPLAY_TIMEOUT;
+        v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
     case DISPLAY_SET_MIN:
         time.minute = ( time.minute + 60 + dir) % 60;
-        s_disp_update_flag = TRUE;
+        v_disp_update_flag = TRUE;
         set_time( time );
-        s_disp_timer = DISPLAY_TIMEOUT;
+        v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
     default:
@@ -868,15 +861,14 @@ time_type   time;
 
 DDRB = 0xFF;
 DDRC = GREEN_EN_PIN | RED_EN_PIN;
-DDRD = (0 << PORTD2) | (0 << PORTD3);
-PORTD = (1 << PORTD2) | (1 << PORTD3) | CLOCK_IN_PIN;
+PORTD = ENCODER_IN_PINS | CLOCK_IN_PIN;
 PORTC = GREEN_EN_PIN | RED_EN_PIN | TWI_PINS | BUTTON_IN_PIN;
 
 init_timers();
 init_spi();
 init_twi();
 
-s_ms = 0;
+v_ms = 0;
 time.hour = 12;
 time.minute = 59;
 s_base = 10;
@@ -891,9 +883,9 @@ while(1)
     process_knob( time );
     format_display(s_base, time);
 
-    if(s_disp_update_flag == TRUE)
+    if(v_disp_update_flag == TRUE)
         {
-        s_disp_update_flag = FALSE;
+        v_disp_update_flag = FALSE;
         display();
         }
 
