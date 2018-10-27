@@ -188,7 +188,7 @@ if(btn_count == DEBOUNCE_RATE)
     btn_count = 0;
     btn_data = btn_data << 1;
     btn_data |= (PINC & BUTTON_IN_PIN);
-    if(btn_data == 0xF0)
+    if(btn_data == 0x80)
         {
         v_disp_state = (v_disp_state + 1) % DISPLAY_COUNT;
         v_disp_timer = DISPLAY_TIMEOUT;
@@ -222,34 +222,56 @@ if(count == 1000)
 //******************************************************************************
 //                          encoder_read
 // reads the value from the encoder calculates the direction of turning by
-// saving the previous 4 states of the encoders, states are only updated if 
-// the encoders value has changes from the last check
+// checking if the correct sequence is seen. Once a turn starting in that 
+// direction is seen (0b01 or 0b10) all future inputs will be ignored unless 
+// they progress the turn sequence or they indicate the knob is back in a 
+// divot (0b00).
 static encoder_dir encoder_read( void )
 {
-static uint16_t     encoder;
-
-uint16_t            data_in;
-encoder_dir         dir;
+static const uint8_t    expected[2][4] = { { 0b01, 0b11, 0b10, 0b00 },   //CCW
+                                           { 0b10, 0b11, 0b01, 0b00 } }; //CW
+static uint8_t          index;
+static uint8_t          dir_index;
+uint8_t                 data_in;
+encoder_dir             dir;
 
 data_in = ((PIND & ENCODER_IN_PINS) >> ENCODER_SHIFT ) & ENCODER_MASK;
 
 dir = ENCODER_NONE;
 
-if((encoder & ENCODER_MASK) != (data_in & ENCODER_MASK))
+if( data_in == 0 )
     {
-    encoder = (encoder << 2) | data_in;
-    //only look at the last 10 bits of the past states
-    //0b0010110100 is counter clockwise
-    if((0x03FF & encoder) == 0b0010110100)
+    if( index == 3 )
         {
-        dir = ENCODER_CW;
+        if( dir_index == 0 )
+            {
+            dir = ENCODER_CCW;
+            }
+        else
+            {
+            dir = ENCODER_CW;
+            }
         }
-    //0b0001111000 is clockwise
-    else if((0x03FF & encoder) == 0b0001111000)
+    index = 0;
+    }
+else if( index == 0 )
+    {
+    if( data_in == expected[0][0] )
         {
-        dir = ENCODER_CCW;
+        dir_index = 0;
+        index++;
+        }
+    else if( data_in == expected[1][0] )
+        {
+        dir_index = 1;
+        index++;
         }
     }
+else if( data_in == expected[dir_index][index] )
+    {
+    index++;
+    }
+
 return(dir);
 }
 
@@ -318,11 +340,12 @@ for(i = 0; i < DIGIT_COUNT; i++)
     disp_red[i] = 0;
     }
 
-if(v_disp_state == DISPLAY_BASE)
+if(v_disp_state == DISPLAY_BASE )
     {
     format_string( "BASE");
 
     min_len = MTH_convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
+
     if(base < 0)
         {
         disp_ptr = disp_red;
@@ -351,9 +374,9 @@ else
 
     sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
     for(i = sec_len; i < max_len; i++)
-    {
+        {
         sec_str[i] = 0;
-    }
+        }
     sec_len = max_len;
 
     min_len = MTH_convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
@@ -640,8 +663,8 @@ CLK_time_type   time;
 
 DDRB = 0xFF;
 DDRC = GREEN_EN_PIN | RED_EN_PIN;
-PORTD = ENCODER_IN_PINS | CLOCK_IN_PIN;
-PORTC = GREEN_EN_PIN | RED_EN_PIN | BUTTON_IN_PIN;
+PORTD = CLOCK_IN_PIN;
+PORTC = GREEN_EN_PIN | RED_EN_PIN;
 
 init_timers();
 spi_init();
