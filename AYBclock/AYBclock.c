@@ -370,7 +370,7 @@ else
     {
     overlap = false;
     dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
-    max_len = MTH_convert_to_base(60, base, hr_str, DIGIT_COUNT);
+    max_len = MTH_convert_to_base(59, base, hr_str, DIGIT_COUNT);
 
     sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
     for(i = sec_len; i < max_len; i++)
@@ -386,7 +386,7 @@ else
         }
     min_len = max_len;
 
-    max_len = MTH_convert_to_base(24, base, hr_str, DIGIT_COUNT);
+    max_len = MTH_convert_to_base(23, base, hr_str, DIGIT_COUNT);
     hr_len = MTH_convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
     for(i = hr_len; i < max_len; i++)
         {
