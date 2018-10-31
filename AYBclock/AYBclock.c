@@ -68,6 +68,8 @@ enum
     DISPLAY_BASE,
     DISPLAY_SET_HOUR,
     DISPLAY_SET_MIN,
+    DISPLAY_SET_SEC_DISP,
+    DISPLAY_SET_OVERLAP,
 
     DISPLAY_COUNT
     };
@@ -132,11 +134,13 @@ static const uint8_t *numbers = digits;
 
 static const uint8_t *letters = &digits[10];
 
+static void display_setting( bool setting );
 static void format_display(int8_t base, CLK_time_type time);
 static void init_timers(void);
 static void display(void);
 static encoder_dir encoder_read(void);
-static void format_string( const char *string );
+static void format_menu_string( const char *string );
+static void format_setting_string( const char *string );
 static void process_knob( CLK_time_type time );
 
 static volatile uint16_t v_ms;
@@ -152,6 +156,8 @@ static uint8_t  disp_red[DIGIT_COUNT];
 static uint8_t  disp_green[DIGIT_COUNT];
 
 static int8_t   s_base;
+static bool     s_disp_sec;
+static bool     s_disp_overlap;
 
 static void init_timers(void)
 {
@@ -276,9 +282,9 @@ return(dir);
 }
 
 //******************************************************************************
-//                          format_string
+//                          format_menu_string
 // Takes a string and adds it to the display in yellow starting at the left end
-static void format_string
+static void format_menu_string
     (
     const char *string
     )
@@ -290,10 +296,79 @@ i = DIGIT_COUNT;
 
 while( *string && i-- > 0 )
     {
-    letter = ( *string & ~0x20 );
-    letter = letters[letter - 'A'];
+    if( *string == ' ' )
+        {
+        letter = 0;
+        }
+    else if( *string >= '0' && *string <= '9' )
+        {
+        letter = numbers[*string - '0'];
+        }
+    else
+        {
+        letter = ( *string & ~0x20 );
+        letter = letters[letter - 'A'];
+        }
     disp_green[i] = letter;
     disp_red[i] = letter;
+    string++;
+    }
+}
+
+//******************************************************************************
+//                          display_setting
+// Displays the state of a boolean setting of 'On' or 'Off'
+static void display_setting
+    (
+    bool    setting
+    )
+{
+if( setting )
+    {
+    format_setting_string( "ON" );
+    }
+else
+    {
+    format_setting_string( "OFF" );
+    }
+}
+
+//******************************************************************************
+//                          format_setting_string
+// Takes a string and adds it to the display in green starting at the right end
+static void format_setting_string
+    (
+    const char *string
+    )
+{
+int8_t      i;
+uint8_t     letter;
+
+i = 0;
+
+while( *string++ )
+    {
+    i++;
+    }
+
+string -= i + 1;
+
+while( *string && i-- > 0 )
+    {
+    if( *string == ' ' )
+        {
+        letter = 0;
+        }
+    else if( *string >= '0' && *string <= '9' )
+        {
+        letter = numbers[*string - '0'];
+        }
+    else
+        {
+        letter = ( *string & ~0x20 );
+        letter = letters[letter - 'A'];
+        }
+    disp_green[i] = letter;
     string++;
     }
 }
@@ -340,246 +415,275 @@ for(i = 0; i < DIGIT_COUNT; i++)
     disp_red[i] = 0;
     }
 
-if(v_disp_state == DISPLAY_BASE )
+switch( v_disp_state )
     {
-    format_string( "BASE");
+    case DISPLAY_BASE:
+        format_menu_string( "BASE" );
 
-    min_len = MTH_convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
+        min_len = MTH_convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
 
-    if(base < 0)
-        {
-        disp_ptr = disp_red;
-        }
-    else
-        {
-        disp_ptr = disp_green;
-        }
-
-    for(i = 0; i < min_len; i++)
-        {
-        *disp_ptr = numbers[min_str[i]];
-        disp_ptr++;
-        }
-
-    if(base < 0)
-        {
-        disp_red[i] = G;
-        }
-    }
-else
-    {
-    overlap = false;
-    dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
-    max_len = MTH_convert_to_base(59, base, hr_str, DIGIT_COUNT);
-
-    sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
-    for(i = sec_len; i < max_len; i++)
-        {
-        sec_str[i] = 0;
-        }
-    sec_len = max_len;
-
-    min_len = MTH_convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
-    for(i = min_len; i < max_len; i++)
-        {
-        min_str[i] = 0;
-        }
-    min_len = max_len;
-
-    max_len = MTH_convert_to_base(23, base, hr_str, DIGIT_COUNT);
-    hr_len = MTH_convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
-    for(i = hr_len; i < max_len; i++)
-        {
-        hr_str[i] = 0;
-        }
-    hr_len = max_len;
-
-    // |Base| > 20 needs to use red/green for the digits, thus can't overlay
-    if(base > 20 || base < -20)
-        {
-        dp_blink = true;
-        for(i = 0; i < sec_len; i++)
+        if(base < 0)
             {
-            if(sec_str[i] >= 40)
-                {
-                disp_red[i] = numbers[sec_str[i] - 40];
-                }
-            else if(sec_str[i] >= 20)
-                {
-                disp_green[i] = numbers[sec_str[i] - 20];
-                disp_red[i] = numbers[sec_str[i] - 20];
-                }
-            else
-                {
-                disp_green[i] = numbers[sec_str[i]];
-                }
+            disp_ptr = disp_red;
             }
-        offset = sec_len;
+        else
+            {
+            disp_ptr = disp_green;
+            }
+
         for(i = 0; i < min_len; i++)
             {
-            if(min_str[i] >= 40)
-                {
-                disp_red[i+offset] = numbers[min_str[i] - 40];
-                }
-            else if(min_str[i] >= 20)
-                {
-                disp_green[i+offset] = numbers[min_str[i] - 20];
-                disp_red[i+offset] = numbers[min_str[i] - 20];
-                }
-            else
-                {
-                disp_green[i+offset] = numbers[min_str[i]];
-                }
+            *disp_ptr = numbers[min_str[i]];
+            disp_ptr++;
             }
-        offset += min_len;
-        for(i = 0; i < hr_len; i++)
+
+        if(base < 0)
             {
-            if(hr_str[i] >= 40)
-                {
-                disp_red[i+offset] = numbers[hr_str[i] - 40];
-                }
-            else if(hr_str[i] >= 20)
-                {
-                disp_green[i+offset] = numbers[hr_str[i] - 20];
-                disp_red[i+offset] = numbers[hr_str[i] - 20];
-                }
-            else
-                {
-                disp_green[i+offset] = numbers[hr_str[i]];
-                }
+            disp_red[i] = G;
             }
-        }
-    // if minutes and hours are too long to fit next to each other overlay
-    // hours in red, minutes in green
-    else if((min_len + hr_len) > DIGIT_COUNT)
-        {
-        overlap = true;
-        sec_len = 0;
-        for(i = 0; i < min_len; i++)
+        break;
+
+    case DISPLAY_TIME:
+    case DISPLAY_SET_HOUR:
+    case DISPLAY_SET_MIN:
+        overlap = false;
+        dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
+        max_len = MTH_convert_to_base(59, base, hr_str, DIGIT_COUNT);
+
+        if( s_disp_sec )
             {
-            disp_green[i] = numbers[min_str[i]];
-            }
-        for(i = 0; i < hr_len; i++)
-            {
-            disp_red[i] = numbers[hr_str[i]];
-            }
-        }
-    else
-        {
-        offset = 0;
-        if( sec_len + min_len + hr_len <= DIGIT_COUNT )
-            {
-            for(i = 0; i < sec_len; i++)
+            sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
+            for(i = sec_len; i < max_len; i++)
                 {
-                disp_green[i] = numbers[sec_str[i]];
-                disp_red[i] = numbers[sec_str[i]];
+                sec_str[i] = 0;
                 }
-            offset += sec_len;
-            dp_blink = true;
+            sec_len = max_len;
             }
         else
             {
             sec_len = 0;
             }
-        for(i = 0; i < min_len; i++)
-            {
-            disp_green[i+offset] = numbers[min_str[i]];
-            }
-        offset += min_len;
-        for(i = 0; i < hr_len; i++)
-            {
-            disp_red[i+offset] = numbers[hr_str[i]];
-            }
-        }
 
-    /*-------------------------------------------
-    Calculate the decimal point placement, If the
-    display mode is setting time highlight the
-    decimal points for the numbers being set
-    otherwise put it between the hour/min/sec
-    divide
-    -------------------------------------------*/
-    dp_green = DP;
-    dp_red = DP;
+        min_len = MTH_convert_to_base(time.minute, base, min_str, DIGIT_COUNT);
+        for(i = min_len; i < max_len; i++)
+            {
+            min_str[i] = 0;
+            }
+        min_len = max_len;
+
+        max_len = MTH_convert_to_base(23, base, hr_str, DIGIT_COUNT);
+        hr_len = MTH_convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
+        for(i = hr_len; i < max_len; i++)
+            {
+            hr_str[i] = 0;
+            }
+        hr_len = max_len;
+
+        // |Base| > 20 needs to use red/green for the digits, thus can't overlay
+        if(base > 20 || base < -20)
+            {
+            dp_blink = true;
+            for(i = 0; i < sec_len; i++)
+                {
+                if(sec_str[i] >= 40)
+                    {
+                    disp_red[i] = numbers[sec_str[i] - 40];
+                    }
+                else if(sec_str[i] >= 20)
+                    {
+                    disp_green[i] = numbers[sec_str[i] - 20];
+                    disp_red[i] = numbers[sec_str[i] - 20];
+                    }
+                else
+                    {
+                    disp_green[i] = numbers[sec_str[i]];
+                    }
+                }
+            offset = sec_len;
+            for(i = 0; i < min_len; i++)
+                {
+                if(min_str[i] >= 40)
+                    {
+                    disp_red[i+offset] = numbers[min_str[i] - 40];
+                    }
+                else if(min_str[i] >= 20)
+                    {
+                    disp_green[i+offset] = numbers[min_str[i] - 20];
+                    disp_red[i+offset] = numbers[min_str[i] - 20];
+                    }
+                else
+                    {
+                    disp_green[i+offset] = numbers[min_str[i]];
+                    }
+                }
+            offset += min_len;
+            for(i = 0; i < hr_len; i++)
+                {
+                if(hr_str[i] >= 40)
+                    {
+                    disp_red[i+offset] = numbers[hr_str[i] - 40];
+                    }
+                else if(hr_str[i] >= 20)
+                    {
+                    disp_green[i+offset] = numbers[hr_str[i] - 20];
+                    disp_red[i+offset] = numbers[hr_str[i] - 20];
+                    }
+                else
+                    {
+                    disp_green[i+offset] = numbers[hr_str[i]];
+                    }
+                }
+            }
+        // if minutes and hours are too long to fit next to each other overlay
+        // hours in red, minutes in green
+        else if((min_len + hr_len) > DIGIT_COUNT || s_disp_overlap )
+            {
+            overlap = true;
+            sec_len = 0;
+            for(i = 0; i < min_len; i++)
+                {
+                disp_green[i] = numbers[min_str[i]];
+                }
+            for(i = 0; i < hr_len; i++)
+                {
+                disp_red[i] = numbers[hr_str[i]];
+                }
+            }
+        else
+            {
+            offset = 0;
+            if( sec_len + min_len + hr_len <= DIGIT_COUNT )
+                {
+                for(i = 0; i < sec_len; i++)
+                    {
+                    disp_green[i] = numbers[sec_str[i]];
+                    disp_red[i] = numbers[sec_str[i]];
+                    }
+                offset += sec_len;
+                dp_blink = true;
+                }
+            else
+                {
+                sec_len = 0;
+                }
+            for(i = 0; i < min_len; i++)
+                {
+                disp_green[i+offset] = numbers[min_str[i]];
+                }
+            offset += min_len;
+            for(i = 0; i < hr_len; i++)
+                {
+                disp_red[i+offset] = numbers[hr_str[i]];
+                }
+            }
+
+        /*-------------------------------------------
+        Calculate the decimal point placement, If the
+        display mode is setting time highlight the
+        decimal points for the numbers being set
+        otherwise put it between the hour/min/sec
+        divide
+        -------------------------------------------*/
+        dp_green = DP;
+        dp_red = DP;
     
-    switch( v_disp_state )
-        {
-        /*---------------------------------------
-        Highlight the hours with decimal points
-        while setting, use yellow if the hours
-        are separate, otherwise use the hour
-        color (red)
-        ---------------------------------------*/
-        case DISPLAY_SET_HOUR:
-            if( overlap )
-                {
-                dp_green = 0;
-                dp_start = sec_len;
-                dp_end = sec_len + hr_len;
-                dp_fill = true;
-                }
-            else
-                {
-                dp_start = sec_len + min_len;
-                dp_end = sec_len + min_len + hr_len;
-                dp_fill = true;
-                }
-            break;
-
-        /*---------------------------------------
-        Highlight the minutes with decimal points
-        while setting, use yellow if the minutes
-        are separate, otherwise use the minute
-        color (green)
-        ---------------------------------------*/
-        case DISPLAY_SET_MIN:
-            if( overlap )
-                {
-                dp_red = 0;
-                }
-            dp_start = sec_len;
-            dp_end = sec_len + min_len;
-            dp_fill = true;
-            break;
-
-        /*---------------------------------------
-        If the hour and minutes are overlapping
-        then put the flashing second at the far
-        right. If there is no overlap put the dot
-        between each group (H/M/S)
-        ---------------------------------------*/
-        default:
-            dp_start = sec_len;
-            if( overlap )
-                {
-                dp_end = dp_start;
-                }
-            else
-                {
-                dp_end = sec_len + min_len;
-                }
-            dp_fill = false;
-            break;
-        }
-
-    if( dp_fill )
-        {
-        for( i = dp_start; i < dp_end; i++ )
+        switch( v_disp_state )
             {
-            if( dp_blink )
+            /*---------------------------------------
+            Highlight the hours with decimal points
+            while setting, use yellow if the hours
+            are separate, otherwise use the hour
+            color (red)
+            ---------------------------------------*/
+            case DISPLAY_SET_HOUR:
+                if( overlap )
+                    {
+                    dp_green = 0;
+                    dp_start = sec_len;
+                    }
+                else
+                    {
+                    dp_start = sec_len + min_len;
+                    }
+                dp_end = dp_start + hr_len;
+                dp_fill = true;
+                break;
+
+            /*---------------------------------------
+            Highlight the minutes with decimal points
+            while setting, use yellow if the minutes
+            are separate, otherwise use the minute
+            color (green)
+            ---------------------------------------*/
+            case DISPLAY_SET_MIN:
+                if( overlap )
+                    {
+                    dp_red = 0;
+                    }
+                dp_start = sec_len;
+                dp_end = dp_start + min_len;
+                dp_fill = true;
+                break;
+
+            /*---------------------------------------
+            If the hour and minutes are overlapping
+            then put the flashing second at the far
+            right. If there is no overlap put the dot
+            between each group (H/M/S)
+            ---------------------------------------*/
+            default:
+                dp_start = sec_len;
+                if( overlap )
+                    {
+                    dp_end = dp_start;
+                    }
+                else
+                    {
+                    dp_end = dp_start + min_len;
+                    }
+                dp_fill = false;
+                break;
+            }
+
+        if( dp_fill )
+            {
+            for( i = dp_start; i < dp_end; i++ )
                 {
-                disp_green[i] |= dp_green;
-                disp_red[i] |= dp_red;
+                if( dp_blink )
+                    {
+                    disp_green[i] |= dp_green;
+                    disp_red[i] |= dp_red;
+                    }
                 }
             }
-        }
-    else if( dp_blink )
-        {
-        disp_green[dp_start] |= dp_green;
-        disp_red[dp_start] |= dp_red;
-        disp_green[dp_end] |= dp_green;
-        disp_red[dp_end] |= dp_red;
-        }
+        else if( dp_blink )
+            {
+            if( dp_start || s_disp_sec )
+                {
+                disp_green[dp_start] |= dp_green;
+                disp_red[dp_start] |= dp_red;
+                }
+            if( dp_end || s_disp_sec )
+                {
+                disp_green[dp_end] |= dp_green;
+                disp_red[dp_end] |= dp_red;
+                }            
+            }
+        break;
+        
+        case DISPLAY_SET_SEC_DISP:
+            format_menu_string( "Seconds" );
+            display_setting( s_disp_sec );
+            break;
+            
+        case DISPLAY_SET_OVERLAP:
+            format_menu_string( "Overlap" );
+            display_setting( s_disp_overlap );
+            break;
+
+        default:
+            format_menu_string( "ERROR 1776" );
+            break;
     }
 }
 
@@ -652,7 +756,18 @@ switch( v_disp_state )
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
+    case DISPLAY_SET_SEC_DISP:
+        s_disp_sec = !s_disp_sec;
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+        
+    case DISPLAY_SET_OVERLAP:
+        s_disp_overlap = !s_disp_overlap;
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+
     default:
+        format_menu_string( "Error 2718" );
         break;
     }
 }
