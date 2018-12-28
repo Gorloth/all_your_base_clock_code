@@ -40,8 +40,8 @@
 
 #define CLOCK_IN_PIN        (1<<PORTD7)
 
-#define ENCODER_IN_PINS     (1<<PORTD2|1<<PORTD3)
-#define ENCODER_SHIFT       2
+#define ENCODER_IN_PINS     (1<<PORTD1|1<<PORTD2)
+#define ENCODER_SHIFT       1
 #define ENCODER_MASK        0x03
 
 #define A  (1<<0)
@@ -70,6 +70,7 @@ enum
     DISPLAY_SET_MIN,
     DISPLAY_SET_SEC_DISP,
     DISPLAY_SET_OVERLAP,
+    DISPLAY_SET_BASE_DISP,
 
     DISPLAY_COUNT
     };
@@ -158,6 +159,7 @@ static uint8_t  disp_green[DIGIT_COUNT];
 static int8_t   s_base;
 static bool     s_disp_sec;
 static bool     s_disp_overlap;
+static bool     s_show_base;
 
 static void init_timers(void)
 {
@@ -194,7 +196,7 @@ if(btn_count == DEBOUNCE_RATE)
     btn_count = 0;
     btn_data = btn_data << 1;
     btn_data |= (PINC & BUTTON_IN_PIN);
-    if(btn_data == 0x80)
+    if(btn_data == 0x7F)
         {
         v_disp_state = (v_disp_state + 1) % DISPLAY_COUNT;
         v_disp_timer = DISPLAY_TIMEOUT;
@@ -234,8 +236,8 @@ if(count == 1000)
 // divot (0b00).
 static encoder_dir encoder_read( void )
 {
-static const uint8_t    expected[2][4] = { { 0b01, 0b11, 0b10, 0b00 },   //CCW
-                                           { 0b10, 0b11, 0b01, 0b00 } }; //CW
+static const uint8_t    expected[2][4] = { { 0b10, 0b00, 0b01, 0b11 },   //CCW
+                                           { 0b01, 0b00, 0b10, 0b11 } }; //CW
 static uint8_t          index;
 static uint8_t          dir_index;
 uint8_t                 data_in;
@@ -245,7 +247,7 @@ data_in = ((PIND & ENCODER_IN_PINS) >> ENCODER_SHIFT ) & ENCODER_MASK;
 
 dir = ENCODER_NONE;
 
-if( data_in == 0 )
+if( data_in == 3 )
     {
     if( index == 3 )
         {
@@ -386,6 +388,7 @@ static void format_display
 int8_t      sec_str[DIGIT_COUNT];
 int8_t      min_str[DIGIT_COUNT];
 int8_t      hr_str[DIGIT_COUNT];
+int8_t      temp_str[DIGIT_COUNT];
 
 uint8_t    *disp_ptr;
 
@@ -393,8 +396,9 @@ uint8_t     i;
 
 uint8_t     sec_len;
 uint8_t     min_len;
-uint8_t     max_len;
 uint8_t     hr_len;
+uint8_t     max_len;
+uint8_t     temp_len;
 uint8_t     offset;
 
 bool        overlap;
@@ -420,7 +424,7 @@ switch( v_disp_state )
     case DISPLAY_BASE:
         format_menu_string( "BASE" );
 
-        min_len = MTH_convert_to_base(abs(base), 10, min_str, DIGIT_COUNT);
+        temp_len = MTH_convert_to_base(abs(base), 10, temp_str, DIGIT_COUNT);
 
         if(base < 0)
             {
@@ -431,9 +435,9 @@ switch( v_disp_state )
             disp_ptr = disp_green;
             }
 
-        for(i = 0; i < min_len; i++)
+        for(i = 0; i < temp_len; i++)
             {
-            *disp_ptr = numbers[min_str[i]];
+            *disp_ptr = numbers[temp_str[i]];
             disp_ptr++;
             }
 
@@ -533,6 +537,7 @@ switch( v_disp_state )
                     disp_green[i+offset] = numbers[hr_str[i]];
                     }
                 }
+            offset += hr_len;
             }
         // if minutes and hours are too long to fit next to each other overlay
         // hours in red, minutes in green
@@ -547,6 +552,14 @@ switch( v_disp_state )
             for(i = 0; i < hr_len; i++)
                 {
                 disp_red[i] = numbers[hr_str[i]];
+                }
+            if( min_len > hr_len )
+                {
+                offset = min_len;
+                }
+            else
+                {
+                offset = hr_len;
                 }
             }
         else
@@ -574,6 +587,28 @@ switch( v_disp_state )
             for(i = 0; i < hr_len; i++)
                 {
                 disp_red[i+offset] = numbers[hr_str[i]];
+                }
+            offset += hr_len;
+            }
+
+        if( s_show_base && offset < (DIGIT_COUNT-2) )
+            {
+            temp_len = MTH_convert_to_base(abs(base), 10, temp_str, DIGIT_COUNT);
+            if(base < 0)
+                {
+                disp_ptr = disp_red;
+                }
+            else
+                {
+                disp_ptr = disp_green;
+                }
+                
+            disp_ptr += (DIGIT_COUNT-2);
+
+            for(i = 0; i < temp_len; i++)
+                {
+                *disp_ptr = numbers[temp_str[i]];
+                disp_ptr++;
                 }
             }
 
@@ -681,6 +716,11 @@ switch( v_disp_state )
             display_setting( s_disp_overlap );
             break;
 
+        case DISPLAY_SET_BASE_DISP:
+            format_menu_string( "DSPBase" );
+            display_setting( s_show_base );
+            break;
+
         default:
             format_menu_string( "ERROR 1776" );
             break;
@@ -763,6 +803,11 @@ switch( v_disp_state )
         
     case DISPLAY_SET_OVERLAP:
         s_disp_overlap = !s_disp_overlap;
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+        
+    case DISPLAY_SET_BASE_DISP:
+        s_show_base = !s_show_base;
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
