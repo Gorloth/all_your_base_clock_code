@@ -11,9 +11,12 @@
 #include <util/twi.h>
 #include <avr/interrupt.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 
+#include "color.h"
 #include "clock.h"
+#include "encoder.h"
 #include "math.h"
 #include "spi.h"
 #include "twi.h"
@@ -26,10 +29,12 @@
 #define DISPLAY_RATE 50
 #define DEBOUNCE_RATE 10
 
-#define PWM_TOP 0x0010
-#define PWM_TOGGLE ( PWM_TOP * .3f )
+#define PWM_TOP 0x00FF
+#define PWM_TOGGLE ( PWM_TOP * .2f )
 #define PWM_RED    ( PWM_TOP * .9f )
 #define PWM_GREEN  ( PWM_TOP * .1f )
+
+#define RAND_BASE_MAX       61
 
 #define GREEN_EN_PIN        (1<<PORTC1)
 #define RED_EN_PIN          (1<<PORTC2)
@@ -40,10 +45,6 @@
 
 #define CLOCK_IN_PIN        (1<<PORTD7)
 
-#define ENCODER_IN_PINS     (1<<PORTD1|1<<PORTD2)
-#define ENCODER_SHIFT       1
-#define ENCODER_MASK        0x03
-
 #define A  (1<<0)
 #define B  (1<<1)
 #define C  (1<<2)
@@ -53,14 +54,6 @@
 #define G  (1<<6)
 #define DP (1<<7)
 
-typedef int8_t encoder_dir;
-enum
-    {
-    ENCODER_CW = -1,
-    ENCODER_CCW = 1,
-    ENCODER_NONE = 0
-    };
-
 typedef uint8_t display_state;
 enum
     {
@@ -68,13 +61,51 @@ enum
     DISPLAY_BASE,
     DISPLAY_SET_HOUR,
     DISPLAY_SET_MIN,
-    DISPLAY_SET_SEC_DISP,
-    DISPLAY_SET_OVERLAP,
-    DISPLAY_SET_BASE_DISP,
+    DISPLAY_SETTINGS,
+    DISPLAY_COLOR_BAL,
+    DISPLAY_COLOR,
+    DISPLAY_RAND_BASE,
 
     DISPLAY_COUNT
     };
+    
+typedef uint8_t setting_type;
+enum
+    {
+    SETTING_MAIN_MENU,
+    SETTING_SEC_DISP,
+    SETTING_OVERLAP,
+    SETTING_BASE_DISP,
+    SETTING_12_HOUR,
+    SETTING_ADVANCED,
+    
+    SETTING_COUNT
+    };
 
+typedef uint8_t color_type;
+enum
+    {
+    COLOR_OFF,
+    COLOR_BASE,
+    COLOR_SEC,
+    COLOR_MIN,
+    COLOR_HR,
+    COLOR_RAND,
+    COLOR_FADE,
+    
+    COLOR_COUNT
+    };
+    
+static const char *color_strings[COLOR_COUNT] =
+    {
+    "OFF",
+    "BASE",
+    "SEC",
+    "MIN",
+    "HOUR",
+    "RAND",
+    "FADE"
+    };
 
 /*------------------------------------
 
@@ -92,6 +123,7 @@ enum
 
 static const uint8_t digits[] =
     {
+    (0),             //None
     (A|B|C|D|E|F),   //0
     (B|C),           //1
     (A|B|G|E|D),     //2
@@ -127,22 +159,23 @@ static const uint8_t digits[] =
     (B|D|F),         //W
     (B|C|E|F|G),     //X
     (B|C|D|F|G),     //Y
-    (A|B|D|E|G),     //Z
-    (0)              //None
+    (A|B|D|E|G)      //Z
     };
 
-static const uint8_t *numbers = digits;
+static const uint8_t *numbers = &digits[1];
 
-static const uint8_t *letters = &digits[10];
+static const uint8_t *letters = &digits[11];
 
 static void display_setting( bool setting );
 static void format_display(int8_t base, CLK_time_type time);
 static void init_timers(void);
 static void display(void);
-static encoder_dir encoder_read(void);
 static void format_menu_string( const char *string );
 static void format_setting_string( const char *string );
+static void format_setting_num( uint8_t num );
+static void check_rand_base( CLK_time_type time );
 static void process_knob( CLK_time_type time );
+static void set_knob_color( CLK_time_type time );
 
 static volatile uint16_t v_ms;
 static volatile uint16_t v_time;
@@ -150,6 +183,7 @@ static volatile uint16_t v_time;
 static volatile uint8_t v_disp_update_flag;
 
 static volatile display_state v_disp_state;
+static volatile setting_type v_settings_state;
 
 static volatile uint16_t v_disp_timer;
 
@@ -157,28 +191,52 @@ static uint8_t  disp_red[DIGIT_COUNT];
 static uint8_t  disp_green[DIGIT_COUNT];
 
 static int8_t   s_base;
-static bool     s_disp_sec;
-static bool     s_disp_overlap;
-static bool     s_show_base;
+static bool     s_settings[SETTING_COUNT];
+
+static bool             s_rand_init;
+static unsigned int     s_rand_seed;
+
+static color_type   s_color_setting;
+
+static uint8_t      s_rand_base_interval;
+
+static uint16_t s_yellow_point;
+
+static const char *s_setting_strings[SETTING_COUNT] =
+    {
+    "Settings",
+    "Seconds",
+    "Overlap",
+    "DSPBase",
+    "12Hour",
+    "ADVSetting"
+    };
 
 static void init_timers(void)
 {
 //PB1 output
 //      clear PB1 on compare match,  Fast PWM mode
-TCCR1A = 1 << COM1A1 | 0 << WGM11 | 0 << WGM10;
-//       clock / 1024
-TCCR1B = 1 << CS12 | 0 << CS11 | 1 << CS10 | 1 << WGM13 | 0 << WGM12;
+//PB2 output for Red encoder LED PWM, clear on match (inverted)
+TCCR1A = 1 << COM1A1 | 1 << COM1B1 | 1 << COM1B0 | 0 << WGM11 | 0 << WGM10;
+//       clock / 64
+TCCR1B = 0 << CS12 | 1 << CS11 | 1 << CS10 | 1 << WGM13 | 0 << WGM12;
 
 //Top
 ICR1 = PWM_TOP;
 
 //Toggle at
 OCR1A = PWM_TOGGLE;
+s_yellow_point = PWM_TOGGLE;
 
 OCR2A = 250 - 1;
 TCCR2A = 1 << COM2A1 | 1 << WGM21;
 TCCR2B = 1 << CS22;
 TIMSK2 = 1 << OCIE2A;
+
+//Encoder LED PWM, clear on match (inverted)
+TCCR0A = 1 << COM0A1 | 1 << COM0A0 | 1 << COM0B1 | 1 << COM0B0 | 1 << WGM01 | 1 << WGM00;
+TCCR0B = 1 << CS00;
+
 }
 
 ISR(TIMER2_COMPA_vect)
@@ -198,17 +256,38 @@ if(btn_count == DEBOUNCE_RATE)
     btn_data |= (PINC & BUTTON_IN_PIN);
     if(btn_data == 0x7F)
         {
-        v_disp_state = (v_disp_state + 1) % DISPLAY_COUNT;
-        v_disp_timer = DISPLAY_TIMEOUT;
+        if( v_disp_state == DISPLAY_SETTINGS )
+            {
+            if( v_settings_state == SETTING_MAIN_MENU )
+                {
+                v_disp_state = 0;
+                }
+            else if( v_settings_state == SETTING_ADVANCED )
+                {
+                v_disp_state++;
+                }
+            else
+                {
+                s_settings[v_settings_state] = !s_settings[v_settings_state];
+                }
+            }
+        else
+            {
+            v_disp_state = (v_disp_state + 1) % DISPLAY_COUNT;
+            if( v_disp_state == DISPLAY_SETTINGS )
+                {
+                v_settings_state = SETTING_MAIN_MENU;
+                }
+            v_disp_timer = DISPLAY_TIMEOUT;
+            }
         }
     }
 if(v_disp_timer)
     {
     v_disp_timer--;
-    if(!v_disp_timer)
+    if(v_disp_timer == 0)
         {
         v_disp_state = DISPLAY_TIME;
-        OCR1A = PWM_TOGGLE;
         }
     }
 if(disp_count++ == DISPLAY_RATE)
@@ -227,61 +306,6 @@ if(count == 1000)
     }
 }
 
-//******************************************************************************
-//                          encoder_read
-// reads the value from the encoder calculates the direction of turning by
-// checking if the correct sequence is seen. Once a turn starting in that 
-// direction is seen (0b01 or 0b10) all future inputs will be ignored unless 
-// they progress the turn sequence or they indicate the knob is back in a 
-// divot (0b00).
-static encoder_dir encoder_read( void )
-{
-static const uint8_t    expected[2][4] = { { 0b10, 0b00, 0b01, 0b11 },   //CCW
-                                           { 0b01, 0b00, 0b10, 0b11 } }; //CW
-static uint8_t          index;
-static uint8_t          dir_index;
-uint8_t                 data_in;
-encoder_dir             dir;
-
-data_in = ((PIND & ENCODER_IN_PINS) >> ENCODER_SHIFT ) & ENCODER_MASK;
-
-dir = ENCODER_NONE;
-
-if( data_in == 3 )
-    {
-    if( index == 3 )
-        {
-        if( dir_index == 0 )
-            {
-            dir = ENCODER_CCW;
-            }
-        else
-            {
-            dir = ENCODER_CW;
-            }
-        }
-    index = 0;
-    }
-else if( index == 0 )
-    {
-    if( data_in == expected[0][0] )
-        {
-        dir_index = 0;
-        index++;
-        }
-    else if( data_in == expected[1][0] )
-        {
-        dir_index = 1;
-        index++;
-        }
-    }
-else if( data_in == expected[dir_index][index] )
-    {
-    index++;
-    }
-
-return(dir);
-}
 
 //******************************************************************************
 //                          format_menu_string
@@ -334,6 +358,27 @@ else
     format_setting_string( "OFF" );
     }
 }
+
+
+//******************************************************************************
+//                          format_setting_num
+// Takes a number and adds it to the display in green starting at the right end
+static void format_setting_num
+    (
+    uint8_t     num
+    )
+{
+uint8_t         i;
+
+i = 0;
+
+do
+    {
+    disp_green[i++] = numbers[ num % 10 ];
+    num = num / 10;
+    } while( num );
+}
+
 
 //******************************************************************************
 //                          format_setting_string
@@ -401,6 +446,8 @@ uint8_t     max_len;
 uint8_t     temp_len;
 uint8_t     offset;
 
+uint8_t     hour;
+
 bool        overlap;
 bool        dp_blink;
 bool        dp_fill;
@@ -408,6 +455,7 @@ uint8_t     dp_start;
 uint8_t     dp_end;
 uint8_t     dp_green;
 uint8_t     dp_red;
+uint16_t    pwm_setting;
 
 for(i = 0; i < DIGIT_COUNT; i++)
     {
@@ -418,6 +466,8 @@ for(i = 0; i < DIGIT_COUNT; i++)
     {
     disp_red[i] = 0;
     }
+    
+pwm_setting = s_yellow_point;
 
 switch( v_disp_state )
     {
@@ -452,9 +502,9 @@ switch( v_disp_state )
     case DISPLAY_SET_MIN:
         overlap = false;
         dp_blink = ((PIND & CLOCK_IN_PIN) == CLOCK_IN_PIN);
-        max_len = MTH_convert_to_base(59, base, hr_str, DIGIT_COUNT);
+        max_len = MTH_convert_to_base(59, base, min_str, DIGIT_COUNT);
 
-        if( s_disp_sec )
+        if( s_settings[SETTING_SEC_DISP] )
             {
             sec_len = MTH_convert_to_base(time.second, base, sec_str, DIGIT_COUNT);
             for(i = sec_len; i < max_len; i++)
@@ -475,11 +525,39 @@ switch( v_disp_state )
             }
         min_len = max_len;
 
-        max_len = MTH_convert_to_base(23, base, hr_str, DIGIT_COUNT);
-        hr_len = MTH_convert_to_base(time.hour, base, hr_str, DIGIT_COUNT);
+        if( s_settings[SETTING_12_HOUR] )
+            {
+            max_len = MTH_convert_to_base(12, base, hr_str, DIGIT_COUNT);
+            }
+        else
+            {
+            max_len = MTH_convert_to_base(23, base, hr_str, DIGIT_COUNT);
+            }
+        
+        hour = time.hour;
+        if( s_settings[SETTING_12_HOUR] )
+            {
+            hour = hour % 12;
+            if( hour == 0 )
+                {
+                hour = 12;
+                }
+            }
+        hr_len = MTH_convert_to_base(hour, base, hr_str, DIGIT_COUNT);
+        
         for(i = hr_len; i < max_len; i++)
             {
-            hr_str[i] = 0;
+            //For 12 mode don't pad 0's on the hours (still keep the size for determining overlap though)
+            if( s_settings[SETTING_12_HOUR] )
+                {
+                //the number array starts at the second element of
+                //the digits array, the first element is a blank
+                hr_str[i] = -1;
+                }
+            else
+                {
+                hr_str[i] = 0;
+                }
             }
         hr_len = max_len;
 
@@ -541,7 +619,7 @@ switch( v_disp_state )
             }
         // if minutes and hours are too long to fit next to each other overlay
         // hours in red, minutes in green
-        else if((min_len + hr_len) > DIGIT_COUNT || s_disp_overlap )
+        else if((min_len + hr_len) > DIGIT_COUNT || s_settings[SETTING_OVERLAP] )
             {
             overlap = true;
             sec_len = 0;
@@ -591,7 +669,7 @@ switch( v_disp_state )
             offset += hr_len;
             }
 
-        if( s_show_base && offset < (DIGIT_COUNT-2) )
+        if( s_settings[SETTING_BASE_DISP] && offset < (DIGIT_COUNT-2) )
             {
             temp_len = MTH_convert_to_base(abs(base), 10, temp_str, DIGIT_COUNT);
             if(base < 0)
@@ -631,6 +709,7 @@ switch( v_disp_state )
             color (red)
             ---------------------------------------*/
             case DISPLAY_SET_HOUR:
+                pwm_setting = PWM_RED;
                 if( overlap )
                     {
                     dp_green = 0;
@@ -651,6 +730,7 @@ switch( v_disp_state )
             color (green)
             ---------------------------------------*/
             case DISPLAY_SET_MIN:
+                pwm_setting = PWM_GREEN;
                 if( overlap )
                     {
                     dp_red = 0;
@@ -693,12 +773,12 @@ switch( v_disp_state )
             }
         else if( dp_blink )
             {
-            if( dp_start || s_disp_sec )
+            if( dp_start || s_settings[SETTING_SEC_DISP] )
                 {
                 disp_green[dp_start] |= dp_green;
                 disp_red[dp_start] |= dp_red;
                 }
-            if( dp_end || s_disp_sec )
+            if( dp_end || s_settings[SETTING_SEC_DISP] )
                 {
                 disp_green[dp_end] |= dp_green;
                 disp_red[dp_end] |= dp_red;
@@ -706,25 +786,41 @@ switch( v_disp_state )
             }
         break;
         
-        case DISPLAY_SET_SEC_DISP:
-            format_menu_string( "Seconds" );
-            display_setting( s_disp_sec );
+        case DISPLAY_SETTINGS:
+            format_menu_string( s_setting_strings[v_settings_state] );
+            if( v_settings_state != SETTING_MAIN_MENU
+             && v_settings_state != SETTING_ADVANCED )
+                {
+                display_setting( s_settings[v_settings_state] );
+                }
             break;
             
-        case DISPLAY_SET_OVERLAP:
-            format_menu_string( "Overlap" );
-            display_setting( s_disp_overlap );
+        case DISPLAY_COLOR_BAL:
+            format_menu_string( "YELLOW" );
+            temp_len = MTH_convert_to_base_unsigned(s_yellow_point, 16, temp_str, DIGIT_COUNT);
+            for(i = 0; i < temp_len; i++)
+                {
+                disp_red[i] = numbers[temp_str[i]];
+                disp_green[i] = numbers[temp_str[i]];
+                }
             break;
-
-        case DISPLAY_SET_BASE_DISP:
-            format_menu_string( "DSPBase" );
-            display_setting( s_show_base );
+        
+        case DISPLAY_COLOR:
+            format_menu_string( "COLOR" );
+            format_setting_string( color_strings[s_color_setting] );
             break;
-
+            
+        case DISPLAY_RAND_BASE:
+            format_menu_string( "RANDBASE" );
+            format_setting_num( s_rand_base_interval );
+            break;
+        
         default:
             format_menu_string( "ERROR 1776" );
             break;
     }
+
+OCR1A = pwm_setting;
 }
 
 static void display(void)
@@ -750,14 +846,42 @@ PORTC |= GREEN_EN_PIN;
 PORTB &= ~DISPLAY_ENABLE_PIN;
 }
 
+
+static void check_rand_base( CLK_time_type time )
+{
+static uint8_t  old_min;
+uint16_t        temp;
+
+if( s_rand_base_interval && v_disp_state == DISPLAY_TIME )
+    {
+    if( old_min != time.minute )
+        {
+        temp = time.minute + time.hour * 60;
+        if( temp % s_rand_base_interval == 0 )
+            {
+            do
+                {
+                s_base = rand() % 120 - 60;
+                } while( s_base < 2 && s_base > -2 );
+            }
+        }
+    }
+old_min = time.minute;
+}
+
 static void process_knob( CLK_time_type time )
 {
-encoder_dir     dir;
+ENC_dir     dir;
 
-dir = encoder_read();
-if( dir == ENCODER_NONE )
+dir = ENC_read();
+if( dir == ENC_NONE )
     {
     return;
+    }
+else if( !s_rand_init )
+    {
+    srand( s_rand_seed );
+    s_rand_init = true;
     }
 
 switch( v_disp_state )
@@ -796,23 +920,93 @@ switch( v_disp_state )
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
 
-    case DISPLAY_SET_SEC_DISP:
-        s_disp_sec = !s_disp_sec;
+    case DISPLAY_SETTINGS:
+        v_settings_state = ( v_settings_state + SETTING_COUNT + dir ) % SETTING_COUNT;
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+    
+    case DISPLAY_COLOR_BAL:
+        s_yellow_point = s_yellow_point + dir;
+        if( s_yellow_point > PWM_TOP )
+            {
+            if( dir > 0 )
+                {
+                s_yellow_point = PWM_TOP;
+                }
+            else
+                {
+                s_yellow_point = 0;
+                }
+            }
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
         
-    case DISPLAY_SET_OVERLAP:
-        s_disp_overlap = !s_disp_overlap;
+    case DISPLAY_COLOR:
+        s_color_setting = ( s_color_setting + COLOR_COUNT + dir ) % COLOR_COUNT;
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
         
-    case DISPLAY_SET_BASE_DISP:
-        s_show_base = !s_show_base;
+    case DISPLAY_RAND_BASE:
+        s_rand_base_interval = ( s_rand_base_interval + RAND_BASE_MAX + dir) % RAND_BASE_MAX;
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
-
+        
     default:
         format_menu_string( "Error 2718" );
+        break;
+    }
+}
+
+static void set_knob_color( CLK_time_type time )
+{
+static bool     update;
+
+switch( s_color_setting )
+    {
+    case COLOR_OFF:
+        ENC_clear_color();
+        break;
+    
+    case COLOR_SEC:
+        ENC_set_color( time.second * 4 );
+        break;
+    
+    case COLOR_MIN:
+        ENC_set_color( time.minute * 4 + time.second / 15 );
+        break;
+    
+    case COLOR_HR:
+        if( s_settings[SETTING_12_HOUR] )
+            {
+            ENC_set_color( time.hour * 20 + time.minute / 3 );
+            }
+        else
+            {
+            ENC_set_color( time.hour * 10 + time.minute / 6 );
+            }
+        break;
+    
+    case COLOR_BASE:
+        ENC_set_color( ( s_base + 60 ) * 2 );
+        break;
+    
+    case COLOR_RAND:
+        if( time.second % 5 == 0 )
+            {
+            if( update )
+                {
+                    ENC_set_color( rand() & 0xFF );
+                }
+            update = false;
+            }
+        else
+            {
+            update = true;
+            }
+        break;
+        
+    case COLOR_FADE:
+        ENC_set_color( v_ms >> 5 );
         break;
     }
 }
@@ -826,6 +1020,7 @@ DDRC = GREEN_EN_PIN | RED_EN_PIN;
 PORTD = CLOCK_IN_PIN;
 PORTC = GREEN_EN_PIN | RED_EN_PIN;
 
+ENC_init();
 init_timers();
 spi_init();
 TWI_init();
@@ -840,15 +1035,23 @@ sei();
 
 while(1)
     {
+    //Use the time from boot to the first user knob turn to seed the RNG
+    if( !s_rand_init )
+        {
+        s_rand_seed++;
+        }
+
     time = CLK_time_get();
+    
+    check_rand_base( time );
     process_knob( time );
     format_display(s_base, time);
+    set_knob_color( time );
 
     if(v_disp_update_flag == true)
         {
         v_disp_update_flag = false;
         display();
         }
-
     }
 }

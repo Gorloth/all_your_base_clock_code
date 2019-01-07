@@ -109,6 +109,12 @@
     <Compile Include="AYBclock.c">
       <SubType>compile</SubType>
     </Compile>
+    <Compile Include="color.c">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="encoder.c">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="math.c">
       <SubType>compile</SubType>
     </Compile>

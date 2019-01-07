@@ -11,6 +11,13 @@ uint8_t MTH_convert_to_base(
     uint8_t     out_sz
     );
 
+uint8_t MTH_convert_to_base_unsigned(
+    uint8_t     number,
+    int8_t      base,
+    int8_t     *output,
+    uint8_t     out_sz
+    );
+
 uint8_t MTH_bcd_to_int(uint8_t data);
 
 uint8_t MTH_int_to_bcd(uint8_t data);

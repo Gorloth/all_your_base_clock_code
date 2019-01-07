@@ -2,7 +2,7 @@
 * spi.h
 */
 
-#include <stdlib.h>
+#include <stdint.h>
 
 void spi_init(void);
 

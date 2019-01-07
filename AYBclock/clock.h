@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 typedef struct{
-    int8_t  hour;
-    int8_t  minute;
-    int8_t  second;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
     } CLK_time_type;
 
 CLK_time_type CLK_time_get(void);
