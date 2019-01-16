@@ -391,6 +391,11 @@ do
     disp[i++] = numbers[ num % 10 ];
     num = num / 10;
     } while( num );
+
+if( disp == disp_red )
+    {
+    disp[i] = G;
+    }
 }
 
 
@@ -485,28 +490,7 @@ switch( v_disp_state )
     {
     case DISPLAY_BASE:
         format_menu_string( "BASE" );
-
-        temp_len = MTH_convert_to_base(abs(base), 10, temp_str, DIGIT_COUNT);
-
-        if(base < 0)
-            {
-            disp_ptr = disp_red;
-            }
-        else
-            {
-            disp_ptr = disp_green;
-            }
-
-        for(i = 0; i < temp_len; i++)
-            {
-            *disp_ptr = numbers[temp_str[i]];
-            disp_ptr++;
-            }
-
-        if(base < 0)
-            {
-            disp_red[i] = G;
-            }
+        format_setting_num( base );
         break;
 
     case DISPLAY_TIME:
