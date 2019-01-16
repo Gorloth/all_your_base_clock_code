@@ -31,10 +31,10 @@
 
 #define PWM_TOP 0x00FF
 #define PWM_TOGGLE ( PWM_TOP * .2f )
-#define PWM_RED    ( PWM_TOP * .9f )
-#define PWM_GREEN  ( PWM_TOP * .1f )
 
 #define RAND_BASE_MAX       61
+#define BASE_MIN           -60
+#define BASE_MAX            60
 
 #define GREEN_EN_PIN        (1<<PORTC1)
 #define RED_EN_PIN          (1<<PORTC2)
@@ -65,6 +65,8 @@ enum
     DISPLAY_COLOR_BAL,
     DISPLAY_COLOR,
     DISPLAY_RAND_BASE,
+    DISPLAY_RAND_BASE_MIN,
+    DISPLAY_RAND_BASE_MAX,
 
     DISPLAY_COUNT
     };
@@ -172,7 +174,7 @@ static void init_timers(void);
 static void display(void);
 static void format_menu_string( const char *string );
 static void format_setting_string( const char *string );
-static void format_setting_num( uint8_t num );
+static void format_setting_num( int8_t num );
 static void check_rand_base( CLK_time_type time );
 static void process_knob( CLK_time_type time );
 static void set_knob_color( CLK_time_type time );
@@ -199,6 +201,8 @@ static unsigned int     s_rand_seed;
 static color_type   s_color_setting;
 
 static uint8_t      s_rand_base_interval;
+static int8_t       s_rand_base_min;
+static int8_t       s_rand_base_max;
 
 static uint16_t s_yellow_point;
 
@@ -365,16 +369,26 @@ else
 // Takes a number and adds it to the display in green starting at the right end
 static void format_setting_num
     (
-    uint8_t     num
+    int8_t     num
     )
 {
 uint8_t         i;
+uint8_t        *disp;
 
 i = 0;
+if( num < 0 )
+    {
+    disp = disp_red;
+    num = num * -1;
+    }
+else
+    {
+    disp = disp_green;
+    }
 
 do
     {
-    disp_green[i++] = numbers[ num % 10 ];
+    disp[i++] = numbers[ num % 10 ];
     num = num / 10;
     } while( num );
 }
@@ -455,7 +469,6 @@ uint8_t     dp_start;
 uint8_t     dp_end;
 uint8_t     dp_green;
 uint8_t     dp_red;
-uint16_t    pwm_setting;
 
 for(i = 0; i < DIGIT_COUNT; i++)
     {
@@ -467,7 +480,6 @@ for(i = 0; i < DIGIT_COUNT; i++)
     disp_red[i] = 0;
     }
     
-pwm_setting = s_yellow_point;
 
 switch( v_disp_state )
     {
@@ -709,7 +721,6 @@ switch( v_disp_state )
             color (red)
             ---------------------------------------*/
             case DISPLAY_SET_HOUR:
-                pwm_setting = PWM_RED;
                 if( overlap )
                     {
                     dp_green = 0;
@@ -730,7 +741,6 @@ switch( v_disp_state )
             color (green)
             ---------------------------------------*/
             case DISPLAY_SET_MIN:
-                pwm_setting = PWM_GREEN;
                 if( overlap )
                     {
                     dp_red = 0;
@@ -814,13 +824,21 @@ switch( v_disp_state )
             format_menu_string( "RANDBASE" );
             format_setting_num( s_rand_base_interval );
             break;
+            
+        case DISPLAY_RAND_BASE_MIN:
+            format_menu_string( "RANDMIN" );
+            format_setting_num( s_rand_base_min );
+            break;
+            
+        case DISPLAY_RAND_BASE_MAX:
+            format_menu_string( "RANDMAX" );
+            format_setting_num( s_rand_base_max );
+            break;
         
         default:
             format_menu_string( "ERROR 1776" );
             break;
     }
-
-OCR1A = pwm_setting;
 }
 
 static void display(void)
@@ -861,7 +879,7 @@ if( s_rand_base_interval && v_disp_state == DISPLAY_TIME )
             {
             do
                 {
-                s_base = rand() % 120 - 60;
+                s_base = rand() % (s_rand_base_max - s_rand_base_min + 1) + s_rand_base_min;
                 } while( s_base < 2 && s_base > -2 );
             }
         }
@@ -898,7 +916,7 @@ switch( v_disp_state )
             {
             s_base = s_base + 3 * dir;
             }
-        else if( s_base == 61 || s_base == -61 )
+        else if( s_base > BASE_MAX || s_base < BASE_MIN )
             {
             s_base -= dir;
             }
@@ -938,6 +956,7 @@ switch( v_disp_state )
                 s_yellow_point = 0;
                 }
             }
+        OCR1A = s_yellow_point;
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
         
@@ -948,6 +967,32 @@ switch( v_disp_state )
         
     case DISPLAY_RAND_BASE:
         s_rand_base_interval = ( s_rand_base_interval + RAND_BASE_MAX + dir) % RAND_BASE_MAX;
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+        
+    case DISPLAY_RAND_BASE_MIN:
+        s_rand_base_min += dir;
+        if( s_rand_base_min == 1 || s_rand_base_min == -1 )
+            {
+            s_rand_base_min = s_rand_base_min + 3 * dir;
+            }
+        else if( s_rand_base_min > s_rand_base_max || s_rand_base_min < BASE_MIN )
+            {
+            s_rand_base_min -= dir;
+            }
+        v_disp_timer = DISPLAY_TIMEOUT;
+        break;
+        
+    case DISPLAY_RAND_BASE_MAX:
+        s_rand_base_max += dir;
+        if( s_rand_base_max == 1 || s_rand_base_max == -1 )
+            {
+            s_rand_base_max = s_rand_base_max + 3 * dir;
+            }
+        else if( s_rand_base_max > BASE_MAX || s_rand_base_max < s_rand_base_min )
+            {
+            s_rand_base_max -= dir;
+            }
         v_disp_timer = DISPLAY_TIMEOUT;
         break;
         
@@ -1030,6 +1075,8 @@ v_ms = 0;
 time.hour = 12;
 time.minute = 59;
 s_base = 10;
+s_rand_base_min = BASE_MIN;
+s_rand_base_max = BASE_MAX;
 
 sei();
 
